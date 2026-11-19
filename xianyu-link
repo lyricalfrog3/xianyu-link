@@ -127,15 +127,26 @@ launch_xianyu() {
 #   itemId: 913921442239    itemId%3A913921442239      "item_id":"..."
 # Newest match wins, so opening a product updates the answer.
 newest_id() {
-    local pid="$1" out
+    local pid="$1" out id
+
+    # Try the app's own process first: cheap, and immune to other apps' noise.
     if [ -n "$pid" ]; then
-        # --pid keeps this cheap and immune to other apps' noise.
         out="$(adb_shell "logcat -d --pid=$pid -t $LOG_TAIL" 2>/dev/null)"
+        id="$(extract_id "$out")"
+        # NB: fall through on "no id found", not merely on empty output -- the
+        # pid-scoped buffer can be thousands of lines yet contain no item id
+        # (e.g. when the detail page ran in another app subprocess).
+        [ -n "$id" ] && { printf '%s' "$id"; return; }
     fi
-    if [ -z "${out:-}" ]; then
-        out="$(adb_shell "logcat -d -t $LOG_TAIL" 2>/dev/null)"
-    fi
-    printf '%s' "$out" \
+
+    # Fall back to the whole buffer.
+    out="$(adb_shell "logcat -d -t $LOG_TAIL" 2>/dev/null)"
+    extract_id "$out"
+}
+
+# Pull the newest plausible item id out of a log blob.
+extract_id() {
+    printf '%s' "$1" \
         | grep -aoE '(item_?[Ii]d|item_id)[^0-9]{0,10}[0-9]{8,20}' \
         | grep -aoE '[0-9]{8,20}' \
         | tail -1
