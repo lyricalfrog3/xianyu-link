@@ -1,0 +1,331 @@
+#!/usr/bin/env bash
+#
+# xianyu-link — get a Xianyu product link while logged out.
+#
+# Reads the item id from Xianyu's own log output (no root, no Frida, no app
+# modification, no login) and hands you the public product URL.
+#
+# Compatible with bash 3.2+ (macOS default). Requires only: adb.
+#
+# https://github.com/<you>/xianyu-link
+
+set -uo pipefail
+
+VERSION="1.0.0"
+PKG="com.taobao.idlefish"
+URL_TEMPLATE="https://www.goofish.com/item?id=%s"
+LOG_TAIL=20000
+
+# ----------------------------------------------------------------- colour ----
+# Disabled automatically when not a TTY, or when NO_COLOR is set.
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ -z "${TERM:-dumb}" ]; then
+    C_RESET=$'\033[0m'; C_DIM=$'\033[2m'; C_BOLD=$'\033[1m'
+    C_RED=$'\033[31m'; C_GREEN=$'\033[32m'; C_YELLOW=$'\033[33m'
+    C_BLUE=$'\033[34m'; C_CYAN=$'\033[36m'
+else
+    C_RESET=''; C_DIM=''; C_BOLD=''
+    C_RED=''; C_GREEN=''; C_YELLOW=''; C_BLUE=''; C_CYAN=''
+fi
+
+# ----------------------------------------------------------------- helpers ---
+say()  { printf '%s\n' "$*"; }
+info() { printf '%s>%s %s\n' "$C_BLUE" "$C_RESET" "$*" >&2; }
+ok()   { printf '%s✓%s %s\n' "$C_GREEN" "$C_RESET" "$*" >&2; }
+warn() { printf '%s!%s %s\n' "$C_YELLOW" "$C_RESET" "$*" >&2; }
+die()  { printf '%s✗%s %s\n' "$C_RED" "$C_RESET" "$*" >&2; exit 1; }
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+usage() {
+    cat <<'EOF'
+xianyu-link — get a Xianyu product link while logged out.
+
+USAGE
+  xianyu-link                   copy the link for the product you are viewing
+  xianyu-link --open            open the product page in your browser
+  xianyu-link --print           print the URL (script-friendly)
+  xianyu-link --id <item-id>    use a specific item id
+  xianyu-link --watch           keep offering the link as you browse
+  xianyu-link --clipboard       put it on the clipboard via an app you choose
+  xianyu-link --doctor          diagnose setup problems
+
+OPTIONS
+  -h, --help                    this help
+  -v, --version                 version
+      --device <serial>         target a specific device (adb -s)
+      --no-color                disable colour
+
+HOW IT WORKS
+  Xianyu logs the item id of every product page it opens. Those logs are
+  readable over plain adb (the `log` group includes the `shell` user), so the id
+  comes straight from the app with no root and no hooking. The public URL is then
+  handed to Android's share sheet, where one tap on Copy finishes the job.
+
+  Nothing is modified. No login state is touched. The app keeps working normally.
+
+REQUIREMENTS
+  adb (Android platform-tools) and USB debugging enabled. That is all.
+
+EXIT CODES
+  0 success   1 usage/setup error   2 no item id found   3 user cancelled
+EOF
+}
+
+# ------------------------------------------------------------------- device --
+DEVICE=""
+NO_COLOR_OPT=""
+
+# Single point of adb invocation. Kept free of array/nested-quote tricks so it
+# behaves identically on bash 3.2 (macOS default) and bash 5.
+adb_base() {
+    if [ -n "$DEVICE" ]; then
+        adb -s "$DEVICE" "$@"
+    else
+        adb "$@"
+    fi
+}
+
+adb_shell() { adb_base shell "$@" 2>/dev/null; }
+
+check_device() {
+    have adb || die "adb not found. Install Android platform-tools and put it on PATH."
+
+    local state
+    state="$(adb_base get-state 2>&1)"
+    case "$state" in
+        device) : ;;
+        *"more than one"*|*"multiple devices"*)
+            die "Multiple devices connected. Pick one with --device <serial>.
+   Available: $(adb devices | awk 'NR>1 && $2=="device" {printf "%s ", $1}')"
+            ;;
+        *"not found"*)
+            die "Device not found (adb says: $state).
+   Connected devices: $(adb devices | awk 'NR>1 && $2=="device" {printf "%s ", $1}')
+   Drop --device to use the only connected phone." ;;
+        *) die "No device/emulator ready (adb says: $state).
+   Enable USB debugging, connect the phone, and accept the RSA prompt." ;;
+    esac
+}
+
+# Xianyu must be running and foreground-ish for its logs to contain the id.
+xianyu_pid() {
+    local p
+    p="$(adb_shell pidof "$PKG" | tr -d '\r ')"
+    # pidof can print several pids (main + subprocesses); the first is the app.
+    printf '%s' "${p%% *}"
+}
+
+launch_xianyu() {
+    info "Xianyu is not running — starting it"
+    adb_shell monkey -p "$PKG" -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1
+    sleep 3
+}
+
+# ---------------------------------------------------------------- id source --
+# Xianyu logs the id in several shapes depending on version and code path:
+#   itemId":"913921442239   itemId\":\"913921442239   itemId=913921442239
+#   itemId: 913921442239    itemId%3A913921442239      "item_id":"..."
+# Newest match wins, so opening a product updates the answer.
+newest_id() {
+    local pid="$1" out
+    if [ -n "$pid" ]; then
+        # --pid keeps this cheap and immune to other apps' noise.
+        out="$(adb_shell "logcat -d --pid=$pid -t $LOG_TAIL" 2>/dev/null)"
+    fi
+    if [ -z "${out:-}" ]; then
+        out="$(adb_shell "logcat -d -t $LOG_TAIL" 2>/dev/null)"
+    fi
+    printf '%s' "$out" \
+        | grep -aoE '(item_?[Ii]d|item_id)[^0-9]{0,10}[0-9]{8,20}' \
+        | grep -aoE '[0-9]{8,20}' \
+        | tail -1
+}
+
+url_for() { printf "$URL_TEMPLATE" "$1"; }
+
+# Xianyu item ids are long numeric strings; reject obvious non-ids.
+valid_id() {
+    case "${1:-}" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    [ "${#1}" -ge 8 ] && [ "${#1}" -le 20 ]
+}
+
+# ---------------------------------------------------------------- delivery ---
+# Root-free delivery. Android exposes no shell `cmd clipboard`, so the two
+# legitimate routes are: open the page, or hand the URL to the share sheet
+# (where the user's own tap on Copy writes the clipboard).
+deliver_share() {
+    local url="$1"
+    adb_shell am start -a android.intent.action.SEND -t text/plain \
+        --es android.intent.extra.TEXT "$url" >/dev/null 2>&1
+}
+
+deliver_open() {
+    local url="$1"
+    adb_shell am start -a android.intent.action.VIEW -d "$url" >/dev/null 2>&1
+}
+
+# Android exposes no shell route to the clipboard (`cmd clipboard` has no
+# implementation, and IClipboard is only reachable from an app process), so a
+# root-free tool cannot write it directly. --clipboard explains that and falls
+# back to the share sheet rather than pretending.
+deliver_clipboard() {
+    return 1
+}
+
+print_link() {
+    local id="$1" url
+    url="$(url_for "$id")"
+    printf '%s\n' "$url"
+}
+
+banner() {
+    local id="$1" url="$2"
+    printf '\n'
+    printf '  %sitem%s  %s\n' "$C_DIM" "$C_RESET" "$id"
+    printf '  %slink%s  %s%s%s\n' "$C_DIM" "$C_RESET" "$C_BOLD" "$url" "$C_RESET"
+    printf '\n'
+}
+
+# ------------------------------------------------------------------ doctor ---
+doctor() {
+    say "${C_BOLD}xianyu-link doctor${C_RESET} (v$VERSION)"
+    say ""
+
+    if have adb; then
+        ok "adb found: $(command -v adb)"
+    else
+        die "adb not found — install Android platform-tools"
+    fi
+
+    local state
+    state="$(adb_base get-state 2>&1)"
+    if [ "$state" = "device" ]; then
+        ok "device connected${DEVICE:+ (serial $DEVICE)}"
+    else
+        warn "device state: $state"
+    fi
+
+    local pid
+    pid="$(xianyu_pid)"
+    if [ -n "$pid" ]; then
+        ok "Xianyu running (pid $pid)"
+    else
+        warn "Xianyu not running — it will be started when needed"
+    fi
+
+    local id
+    id="$(newest_id "$pid")"
+    if [ -n "$id" ]; then
+        ok "item id in logs: $id"
+        say "    -> $(url_for "$id")"
+    else
+        warn "no item id in logs yet"
+        say "    open a product page in Xianyu once, then re-run"
+    fi
+
+    say ""
+    say "${C_DIM}Root: not required. Clipboard: reached via the Android share sheet.${C_RESET}"
+}
+
+# -------------------------------------------------------------------- watch --
+watch() {
+    info "Watching for products — open them in Xianyu. Ctrl-C to stop."
+    local last="" id pid
+    while :; do
+        pid="$(xianyu_pid)"
+        id="$(newest_id "$pid")"
+        if [ -n "$id" ] && [ "$id" != "$last" ] && valid_id "$id"; then
+            last="$id"
+            banner "$id" "$(url_for "$id")"
+            deliver_share "$(url_for "$id")"
+            info "share sheet opened — tap Copy"
+        fi
+        sleep 2
+    done
+}
+
+# --------------------------------------------------------------------- main --
+mode="share"
+explicit_id=""
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -h|--help)    usage; exit 0 ;;
+        -v|--version) printf 'xianyu-link %s\n' "$VERSION"; exit 0 ;;
+        --open)       mode="open" ;;
+        --print)      mode="print" ;;
+        --share)      mode="share" ;;
+        --clipboard)  mode="clipboard" ;;
+        --watch)      mode="watch" ;;
+        --doctor)     mode="doctor" ;;
+        --no-color)   NO_COLOR_OPT=1
+                      C_RESET=''; C_DIM=''; C_BOLD=''
+                      C_RED=''; C_GREEN=''; C_YELLOW=''; C_BLUE=''; C_CYAN='' ;;
+        --id)         shift; explicit_id="${1:-}"; mode="id-explicit" ;;
+        --device)     shift; DEVICE="${1:-}"
+                      [ -n "$DEVICE" ] || die "--device needs a serial" ;;
+        *)            die "Unknown option: $1 (try --help)" ;;
+    esac
+    shift
+done
+
+if [ -n "$NO_COLOR_OPT" ]; then
+    C_RESET=''; C_DIM=''; C_BOLD=''
+    C_RED=''; C_GREEN=''; C_YELLOW=''; C_BLUE=''; C_CYAN=''
+fi
+
+check_device
+
+[ "$mode" = "doctor" ] && { doctor; exit 0; }
+[ "$mode" = "watch" ]  && { watch; exit 0; }
+
+# Resolve the id.
+id=""
+if [ "$mode" = "id-explicit" ]; then
+    valid_id "$explicit_id" || die "Not a plausible item id: '$explicit_id'"
+    id="$explicit_id"
+else
+    pid="$(xianyu_pid)"
+    if [ -z "$pid" ]; then
+        launch_xianyu
+        pid="$(xianyu_pid)"
+        [ -n "$pid" ] || die "Could not start Xianyu"
+    fi
+    id="$(newest_id "$pid")"
+    if [ -z "$id" ]; then
+        die "No product found in Xianyu's logs.
+   Open a product page in the app first, then run this again.
+   (Tip: ./xianyu-link --watch keeps this running in the background.)"
+    fi
+    valid_id "$id" || die "Found a suspicious id in the logs: '$id'"
+fi
+
+url="$(url_for "$id")"
+
+case "$mode" in
+    print)
+        print_link "$id"
+        ;;
+    open)
+        deliver_open "$url"
+        ok "opened in browser"
+        banner "$id" "$url"
+        ;;
+    clipboard)
+        if deliver_clipboard "$url"; then
+            ok "copied to clipboard"
+        else
+            warn "Direct clipboard writes need root on Android."
+            warn "Opening the share sheet instead — tap Copy there."
+            deliver_share "$url"
+            banner "$id" "$url"
+        fi
+        ;;
+    *)
+        deliver_share "$url"
+        banner "$id" "$url"
+        info "share sheet opened — tap Copy (or any app) to finish"
+        ;;
+esac
