@@ -7,6 +7,7 @@
 #
 # Compatible with bash 3.2+ (macOS default). Requires only: adb.
 #
+# https://github.com/lyricalfrog3/xianyu-link
 # See README.md for install, usage and limitations.
 
 set -uo pipefail
@@ -42,14 +43,20 @@ usage() {
 xianyu-link — get a Xianyu product link while logged out.
 
 USAGE
-  xianyu-link                   copy the link for the product you are viewing
+  xianyu-link                   print the link for the product you are viewing
+                                (opens nothing -- safe to run any time)
+  xianyu-link --print           same, explicit
+  xianyu-link --share           open the Android share sheet with the link
+                                (one tap on Copy there finishes the job)
   xianyu-link --open            open the product page in your browser
-  xianyu-link --print           print the URL (script-friendly)
   xianyu-link --id <item-id>    use a specific item id
-  xianyu-link --watch           keep offering the link as you browse
+  xianyu-link --watch           print links as you browse; add --share to also
+                                pop the share sheet for each new product
   xianyu-link --clipboard       attempt a clipboard write; falls back to the
                                 share sheet (a direct write needs root)
   xianyu-link --doctor          diagnose setup problems
+
+  Nothing pops up unless you pass --share, --open or --clipboard.
 
 OPTIONS
   -h, --help                    this help
@@ -60,8 +67,8 @@ OPTIONS
 HOW IT WORKS
   Xianyu logs the item id of every product page it opens. Those logs are
   readable over plain adb (the `log` group includes the `shell` user), so the id
-  comes straight from the app with no root and no hooking. The public URL is then
-  handed to Android's share sheet, where one tap on Copy finishes the job.
+  comes straight from the app with no root and no hooking. The public URL is
+  printed; if you also want it on the clipboard, pass --share and tap Copy.
 
   Nothing is modified. No login state is touched. The app keeps working normally.
 
@@ -263,23 +270,34 @@ doctor() {
 
 # -------------------------------------------------------------------- watch --
 watch() {
-    info "Watching for products — open them in Xianyu. Ctrl-C to stop."
+    local also_share="$1"
+    if [ "$also_share" = "1" ]; then
+        info "Watching — each new product opens the share sheet. Ctrl-C to stop."
+    else
+        info "Watching — printing links. Ctrl-C to stop."
+        info "add --share to also open the share sheet for each new product"
+    fi
     local last="" id pid
     while :; do
         pid="$(xianyu_pid)"
         id="$(newest_id "$pid")"
         if [ -n "$id" ] && [ "$id" != "$last" ] && valid_id "$id"; then
             last="$id"
-            banner "$id" "$(url_for "$id")"
-            deliver_share "$(url_for "$id")"
-            info "share sheet opened — tap Copy"
+            if [ "$also_share" = "1" ]; then
+                banner "$id" "$(url_for "$id")"
+                deliver_share "$(url_for "$id")"
+                info "share sheet opened — tap Copy"
+            else
+                printf '%s\n' "$(url_for "$id")"
+            fi
         fi
         sleep 2
     done
 }
 
 # --------------------------------------------------------------------- main --
-mode="share"
+mode="print"          # safe default: print the URL, open nothing
+want_share=0
 explicit_id=""
 
 while [ $# -gt 0 ]; do
@@ -288,7 +306,7 @@ while [ $# -gt 0 ]; do
         -v|--version) printf 'xianyu-link %s\n' "$VERSION"; exit 0 ;;
         --open)       mode="open" ;;
         --print)      mode="print" ;;
-        --share)      mode="share" ;;
+        --share)      mode="share"; want_share=1 ;;
         --clipboard)  mode="clipboard" ;;
         --watch)      mode="watch" ;;
         --doctor)     mode="doctor" ;;
@@ -311,7 +329,7 @@ fi
 check_device
 
 [ "$mode" = "doctor" ] && { doctor; exit 0; }
-[ "$mode" = "watch" ]  && { watch; exit 0; }
+[ "$mode" = "watch" ]  && { watch "$want_share"; exit 0; }
 
 # Resolve the id.
 id=""
@@ -339,6 +357,8 @@ url="$(url_for "$id")"
 case "$mode" in
     print)
         print_link "$id"
+        # Hint to stderr so `xianyu-link > file` stays clean.
+        info "tip: --share opens the Android share sheet, --open opens a browser"
         ;;
     open)
         deliver_open "$url"
@@ -355,7 +375,7 @@ case "$mode" in
             banner "$id" "$url"
         fi
         ;;
-    *)
+    share)
         deliver_share "$url"
         banner "$id" "$url"
         info "share sheet opened — tap Copy (or any app) to finish"

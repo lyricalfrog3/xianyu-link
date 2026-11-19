@@ -2,10 +2,15 @@
 
 Get a **Xianyu (闲鱼) product link while logged out** — no root, no Frida, no APK patching, no login.
 
-Tapping *Share → 复制链接* on a product page while logged out throws a login wall at you. This tool sidesteps the app's share panel entirely and gives you the public product URL another way: one command, then tap Copy.
+Tapping *Share → 复制链接* on a product page while logged out throws a login wall at you. This tool sidesteps the app's share panel entirely and gives you the public product URL another way: one command, one URL.
+
+By default it just **prints** the link and opens nothing. Add `--share` when you want it on the clipboard (via the Android share sheet).
 
 ```console
 $ xianyu-link
+https://www.goofish.com/item?id=863824608549
+
+$ xianyu-link --share
   item  863824608549
   link  https://www.goofish.com/item?id=863824608549
 
@@ -35,7 +40,7 @@ Works with the stock `pidof`, falling back to `ps` on older or stripped ROMs.
 `--doctor` reports which one your device provided.
 
 ```bash
-git clone https://github.com/OWNER/xianyu-link.git   # replace OWNER
+git clone https://github.com/lyricalfrog3/xianyu-link.git
 cd xianyu-link
 ./install.sh          # copies to ~/.local/bin
 ```
@@ -59,25 +64,41 @@ sudo apt install android-tools-adb
 ## Usage
 
 ```bash
-xianyu-link                 # share sheet with the link for the product you're viewing
+xianyu-link                 # print the link for the product you're viewing
+xianyu-link --share         # same, then open the Android share sheet
 xianyu-link --open          # open the product page in your browser
-xianyu-link --print         # print the URL (for scripts)
 xianyu-link --id 863824608549
-xianyu-link --watch         # keep offering links while you browse
+xianyu-link --watch         # print links as you browse
 xianyu-link --doctor        # diagnose setup problems
 ```
 
-**Typical flow**
+> **Nothing pops up unless you ask.** Plain `xianyu-link` prints a URL and opens
+> nothing — safe to run in a terminal, a script, or a cron job. Only `--share`,
+> `--open` and `--clipboard` touch the phone's UI.
+
+**Typical flow — just the link**
 
 1. Open a product in Xianyu on the phone.
 2. Run `xianyu-link`.
-3. Tap **Copy** in the Android share sheet that appears.
-4. Paste anywhere.
-
-Or skip the phone entirely:
+3. Copy it from your terminal, or pipe it somewhere:
 
 ```bash
-xianyu-link --open          # page opens on your desktop browser instead
+xianyu-link | pbcopy            # macOS
+xianyu-link | wl-copy           # Wayland
+xianyu-link | xclip -selection c  # X11
+```
+
+**Typical flow — get it onto the phone's clipboard**
+
+1. Open a product in Xianyu on the phone.
+2. Run `xianyu-link --share`.
+3. Tap **Copy** in the Android share sheet that appears.
+4. Paste anywhere on the phone.
+
+**Or skip the phone entirely**
+
+```bash
+xianyu-link --open          # page opens in your desktop browser
 ```
 
 ---
@@ -86,11 +107,12 @@ xianyu-link --open          # page opens on your desktop browser instead
 
 | Command | What it does |
 |---|---|
-| *(none)* | Opens the Android share sheet with the product URL |
+| *(none)* | Prints the product URL. Opens nothing. |
 | `--open` | Opens the product page in the default browser |
-| `--print` | Prints the URL to stdout, nothing else |
+| `--print` | Same as the default: URL on stdout, nothing else |
+| `--share` | Opens the Android share sheet with the URL |
 | `--id <id>` | Uses a specific item id instead of reading logs |
-| `--watch` | Watches for new products and offers each link |
+| `--watch` | Prints a link for each new product; add `--share` to pop the sheet |
 | `--clipboard` | Attempts a clipboard write; falls back to the share sheet (a direct write needs root) |
 | `--doctor` | Checks adb, device, app state, and whether an id is available |
 | `--device <serial>` | Targets a specific device when several are connected |
