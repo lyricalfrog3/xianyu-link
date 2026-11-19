@@ -7,7 +7,7 @@
 #
 # Compatible with bash 3.2+ (macOS default). Requires only: adb.
 #
-# https://github.com/<you>/xianyu-link
+# See README.md for install, usage and limitations.
 
 set -uo pipefail
 
@@ -32,7 +32,8 @@ say()  { printf '%s\n' "$*"; }
 info() { printf '%s>%s %s\n' "$C_BLUE" "$C_RESET" "$*" >&2; }
 ok()   { printf '%s✓%s %s\n' "$C_GREEN" "$C_RESET" "$*" >&2; }
 warn() { printf '%s!%s %s\n' "$C_YELLOW" "$C_RESET" "$*" >&2; }
-die()  { printf '%s✗%s %s\n' "$C_RED" "$C_RESET" "$*" >&2; exit 1; }
+# die MESSAGE [CODE] -- defaults to 1 (usage/setup). Use 2 for "no item id".
+die()  { printf '%s✗%s %s\n' "$C_RED" "$C_RESET" "$1" >&2; exit "${2:-1}"; }
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
@@ -46,7 +47,8 @@ USAGE
   xianyu-link --print           print the URL (script-friendly)
   xianyu-link --id <item-id>    use a specific item id
   xianyu-link --watch           keep offering the link as you browse
-  xianyu-link --clipboard       put it on the clipboard via an app you choose
+  xianyu-link --clipboard       attempt a clipboard write; falls back to the
+                                share sheet (a direct write needs root)
   xianyu-link --doctor          diagnose setup problems
 
 OPTIONS
@@ -67,7 +69,7 @@ REQUIREMENTS
   adb (Android platform-tools) and USB debugging enabled. That is all.
 
 EXIT CODES
-  0 success   1 usage/setup error   2 no item id found   3 user cancelled
+  0 success   1 usage/setup error   2 no item id found
 EOF
 }
 
@@ -111,8 +113,21 @@ check_device() {
 xianyu_pid() {
     local p
     p="$(adb_shell pidof "$PKG" | tr -d '\r ')"
-    # pidof can print several pids (main + subprocesses); the first is the app.
-    printf '%s' "${p%% *}"
+    # pidof may print several pids (main + subprocesses); the first is the app.
+    p="${p%% *}"
+    if [ -n "$p" ]; then
+        printf '%s' "$p"
+        return
+    fi
+    # pidof is missing on some old/stripped ROMs; fall back to ps.
+    adb_shell ps -A 2>/dev/null \
+        | awk -v pkg="$PKG" '$NF == pkg {print $2; exit}'
+}
+
+# Does the device provide pidof at all? --doctor reports this, because a missing
+# pidof used to look identical to "app not running".
+have_device_pidof() {
+    adb_shell 'command -v pidof' >/dev/null 2>&1
 }
 
 launch_xianyu() {
@@ -147,7 +162,7 @@ newest_id() {
 # Pull the newest plausible item id out of a log blob.
 extract_id() {
     printf '%s' "$1" \
-        | grep -aoE '(item_?[Ii]d|item_id)[^0-9]{0,10}[0-9]{8,20}' \
+        | grep -aoE 'item_?[Ii]d([^0-9]|%[0-9A-Fa-f]{2}){0,10}[0-9]{8,20}' \
         | grep -aoE '[0-9]{8,20}' \
         | tail -1
 }
@@ -218,6 +233,12 @@ doctor() {
         warn "device state: $state"
     fi
 
+    if have_device_pidof; then
+        ok "device has pidof"
+    else
+        warn "device has no pidof — using ps fallback (older/custom ROM)"
+    fi
+
     local pid
     pid="$(xianyu_pid)"
     if [ -n "$pid" ]; then
@@ -274,7 +295,7 @@ while [ $# -gt 0 ]; do
         --no-color)   NO_COLOR_OPT=1
                       C_RESET=''; C_DIM=''; C_BOLD=''
                       C_RED=''; C_GREEN=''; C_YELLOW=''; C_BLUE=''; C_CYAN='' ;;
-        --id)         shift; explicit_id="${1:-}"; mode="id-explicit" ;;
+        --id)         shift; explicit_id="${1:-}" ;;
         --device)     shift; DEVICE="${1:-}"
                       [ -n "$DEVICE" ] || die "--device needs a serial" ;;
         *)            die "Unknown option: $1 (try --help)" ;;
@@ -294,7 +315,7 @@ check_device
 
 # Resolve the id.
 id=""
-if [ "$mode" = "id-explicit" ]; then
+if [ -n "$explicit_id" ]; then
     valid_id "$explicit_id" || die "Not a plausible item id: '$explicit_id'"
     id="$explicit_id"
 else
@@ -308,7 +329,7 @@ else
     if [ -z "$id" ]; then
         die "No product found in Xianyu's logs.
    Open a product page in the app first, then run this again.
-   (Tip: ./xianyu-link --watch keeps this running in the background.)"
+   (Tip: ./xianyu-link --watch keeps this running in the background.)" 2
     fi
     valid_id "$id" || die "Found a suspicious id in the logs: '$id'"
 fi

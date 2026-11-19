@@ -31,8 +31,11 @@ Which means the link is one regex and a URL template away. No privilege escalati
 
 **Requirements:** `adb` (Android platform-tools) and USB debugging enabled. That is genuinely all — no root, no Python, no Frida.
 
+Works with the stock `pidof`, falling back to `ps` on older or stripped ROMs.
+`--doctor` reports which one your device provided.
+
 ```bash
-git clone https://github.com/<you>/xianyu-link.git
+git clone https://github.com/OWNER/xianyu-link.git   # replace OWNER
 cd xianyu-link
 ./install.sh          # copies to ~/.local/bin
 ```
@@ -88,7 +91,7 @@ xianyu-link --open          # page opens on your desktop browser instead
 | `--print` | Prints the URL to stdout, nothing else |
 | `--id <id>` | Uses a specific item id instead of reading logs |
 | `--watch` | Watches for new products and offers each link |
-| `--clipboard` | Explains why root-free direct clipboard isn't possible, then falls back |
+| `--clipboard` | Attempts a clipboard write; falls back to the share sheet (a direct write needs root) |
 | `--doctor` | Checks adb, device, app state, and whether an id is available |
 | `--device <serial>` | Targets a specific device when several are connected |
 | `--no-color` | Plain output |
@@ -144,6 +147,12 @@ Long-press the text in the sheet, or use `--open` and copy from the browser.
 
 **Wrong product's link**
 The tool returns the *newest* id in the log. Open the product you want, then run it again — or use `--watch` so it always matches what's on screen.
+
+When the app's own process buffer yields no id, the tool falls back to scanning
+the **entire** logcat buffer, not just Xianyu's lines. On a busy device that could
+in principle match an unrelated app's 8–20 digit number next to an `itemId`
+token. If a link looks wrong, check it against the product on screen and re-run;
+`--id` lets you supply the real one directly.
 
 **Item id looks wrong**
 Ids are 8–20 digits. If the log contains something that merely *looks* like an id (a timestamp, a session token), use `--id` with the real one.
